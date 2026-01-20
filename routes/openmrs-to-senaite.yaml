@@ -1,0 +1,53 @@
+- from:
+    uri: "kafka:dbserver1.openmrs.person_name?brokers=kafka:29092"
+    steps:
+      - setHeader:
+          name: "op"
+          jsonpath: "$['payload']['op']"
+      
+      - choice:
+          when:
+            - simple: "${header.op} == 'c'"
+              steps:
+                - setHeader:
+                    name: "givenName"
+                    jsonpath: "$['payload']['after']['given_name']"
+                - setHeader:
+                    name: "familyName"
+                    jsonpath: "$['payload']['after']['family_name']"
+                - setHeader:
+                    name: "personId"
+                    jsonpath: "$['payload']['after']['person_id']"
+                
+                - log: "Syncing Patient: ${header.givenName} to SENAITE via REST API..."
+
+                # 1. Build JSON Body (Standard Plone REST API format)
+                - setBody:
+                    simple: |
+                      {
+                        "@type": "Client",
+                        "title": "${header.givenName} ${header.familyName}",
+                        "id": "omrs-${header.personId}",
+                        "ClientID": "omrs-${header.personId}"
+                      }
+
+                # 2. Set API Headers
+                - setHeader:
+                    name: "Content-Type"
+                    constant: "application/json"
+                - setHeader:
+                    name: "Accept"
+                    constant: "application/json"
+                - setHeader:
+                    name: "Authorization"
+                    constant: "Basic YWRtaW46YWRtaW4="
+                - setHeader:
+                    name: "CamelHttpMethod"
+                    constant: "POST"
+
+                # 3. Use the Standard Folder Endpoint
+                # This hits the 'clients' folder directly to create the item
+                - to: "http://senaite:8080/senaite/clients"
+                
+                - log: "SENAITE Response: ${body}"
+                - log: "SUCCESS: Patient created in SENAITE."
