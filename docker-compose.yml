@@ -108,15 +108,17 @@ services:
 
   # --- APACHE CAMEL (The Intelligence/Brain) ---
   camel:
-    image: apache/camel-jbang:4.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile.camel  # This tells it NOT to use the default Dockerfile
+    container_name: camel-sync
+    restart: "always"
     depends_on:
       - kafka
       - senaite
     volumes:
       - ./routes:/deployments
-    # This command tells Camel to run the route file we will create in the next step
-    command: "run /deployments/openmrs-to-senaite.yaml"
-
+    command: "camel run /deployments/openmrs-to-senaite.yaml /deployments/openmrs-orders-to-senaite.yaml"
 volumes:
   openmrs-data: ~
   db-data: ~

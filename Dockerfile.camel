@@ -1,0 +1,17 @@
+# Use a solid Java image that already has Java 17
+FROM eclipse-temurin:17-jdk
+
+# Install JBang
+RUN curl -Ls https://sh.jbang.dev | bash -s - app setup
+ENV PATH="/root/.jbang/bin:${PATH}"
+
+# THE FIX: Tell JBang to trust the Apache GitHub source automatically
+RUN jbang trust add https://github.com/apache/
+
+# Install Camel
+RUN jbang app install camel@apache/camel
+
+# This pre-downloads the Camel components so they are ready offline
+RUN camel --version
+
+WORKDIR /deployments

@@ -4,7 +4,6 @@
       - setHeader:
           name: "op"
           jsonpath: "$['payload']['op']"
-      
       - choice:
           when:
             - simple: "${header.op} == 'c'"
@@ -19,35 +18,28 @@
                     name: "personId"
                     jsonpath: "$['payload']['after']['person_id']"
                 
-                - log: "Syncing Patient: ${header.givenName} to SENAITE via REST API..."
+                - log: "Syncing Patient: ${header.givenName} (omrs-${header.personId})"
 
-                # 1. Build JSON Body (Standard Plone REST API format)
                 - setBody:
                     simple: |
                       {
                         "@type": "Client",
-                        "title": "${header.givenName} ${header.familyName}",
                         "id": "omrs-${header.personId}",
-                        "ClientID": "omrs-${header.personId}"
+                        "ClientID": "omrs-${header.personId}",
+                        "title": "${header.givenName} ${header.familyName}",
+                        "Name": "${header.givenName} ${header.familyName}"
                       }
-
-                # 2. Set API Headers
+                - setHeader:
+                    name: "Authorization"
+                    constant: "Basic YWRtaW46YWRtaW4="
                 - setHeader:
                     name: "Content-Type"
                     constant: "application/json"
                 - setHeader:
                     name: "Accept"
                     constant: "application/json"
-                - setHeader:
-                    name: "Authorization"
-                    constant: "Basic YWRtaW46YWRtaW4="
-                - setHeader:
-                    name: "CamelHttpMethod"
-                    constant: "POST"
-
-                # 3. Use the Standard Folder Endpoint
-                # This hits the 'clients' folder directly to create the item
-                - to: "http://senaite:8080/senaite/clients"
                 
-                - log: "SENAITE Response: ${body}"
-                - log: "SUCCESS: Patient created in SENAITE."
+                # We POST to the clients folder. 
+                - to: "http://senaite:8080/senaite/clients?throwExceptionOnFailure=false"
+                
+                - log: "SENAITE PATIENT RESPONSE: ${body}"
