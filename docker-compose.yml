@@ -1,3 +1,5 @@
+version: "3.1"
+
 services:
   # --- OPENMRS CORE ---
   gateway:
@@ -16,9 +18,6 @@ services:
       SPA_PATH: /openmrs/spa
       API_URL: /openmrs
       SPA_CONFIG_URLS: /openmrs/spa/config-core_demo.json
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/"]
-      timeout: 5s
     depends_on:
       - backend
 
@@ -35,22 +34,13 @@ services:
       OMRS_CONFIG_CONNECTION_DATABASE: openmrs
       OMRS_CONFIG_CONNECTION_USERNAME: ${OMRS_DB_USER:-openmrs}
       OMRS_CONFIG_CONNECTION_PASSWORD: ${OMRS_DB_PASSWORD:-openmrs}
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/openmrs"]
-      timeout: 5s
     volumes:
       - openmrs-data:/openmrs/data
 
   db:
     image: mariadb:10.11.7
     restart: "unless-stopped"
-    # Binlogs are required for Debezium to "read" the database changes
     command: "mysqld --character-set-server=utf8mb4 --collation-server=utf8mb4_general_ci --binlog-format=ROW --log-bin=mysql-bin --server-id=1"
-    healthcheck:
-      test: "mysql --user=${OMRS_DB_USER:-openmrs} --password=${OMRS_DB_PASSWORD:-openmrs} --execute \"SHOW DATABASES;\""
-      interval: 3s
-      timeout: 1s
-      retries: 5
     environment:
       MYSQL_DATABASE: openmrs
       MYSQL_USER: ${OMRS_DB_USER:-openmrs}
@@ -59,7 +49,33 @@ services:
     volumes:
       - db-data:/var/lib/mysql
 
-  # --- KAFKA INFRASTRUCTURE (The Hub) ---
+  # --- BILLING SYSTEM (ODOO) ---
+  odoo-db:
+    image: postgres:13
+    container_name: odoo16-db
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=odoo
+      - POSTGRES_PASSWORD=odoo
+    volumes:
+      - odoo-db-data:/var/lib/postgresql/data
+
+  odoo:
+    image: odoo:16.0
+    container_name: odoo16
+    ports:
+      - "8069:8069"
+    depends_on:
+      - odoo-db
+    environment:
+      - HOST=odoo-db
+      - USER=odoo
+      - PASSWORD=odoo
+    volumes:
+      - odoo-web-data:/var/lib/odoo
+      - ./addons:/mnt/extra-addons
+
+  # --- KAFKA INFRASTRUCTURE ---
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     environment:
@@ -79,7 +95,7 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
-  # --- DEBEZIUM (The Connector) ---
+  # --- DEBEZIUM ---
   connect:
     image: debezium/connect:2.4
     depends_on:
@@ -100,26 +116,27 @@ services:
     ports:
       - "8081:8080"
     environment:
-      # Enables JSON API and the Patient module
       - ADDONS=senaite.jsonapi senaite.patient
     restart: "unless-stopped"
     volumes:
       - senaite-data:/data
 
-  # --- APACHE CAMEL (The Intelligence/Brain) ---
+  # --- APACHE CAMEL SYNC ---
   camel:
-    build:
-      context: .
-      dockerfile: Dockerfile.camel  # This tells it NOT to use the default Dockerfile
+    image: apache/camel-jbang:4.0.0
     container_name: camel-sync
     restart: "always"
     depends_on:
       - kafka
       - senaite
+      - odoo
     volumes:
       - ./routes:/deployments
-    command: "camel run /deployments/openmrs-to-senaite.yaml /deployments/openmrs-orders-to-senaite.yaml"
+    command: "run /deployments/openmrs-to-senaite.yaml /deployments/openmrs-orders-to-senaite.yaml /deployments/senaite-results-to-openmrs.yaml /deployments/openmrs-to-odoo-patient.yaml /deployments/openmrs-orders-to-odoo-billing.yaml"
+
 volumes:
-  openmrs-data: ~
-  db-data: ~
-  senaite-data: ~
+  openmrs-data:
+  db-data:
+  senaite-data:
+  odoo-db-data:
+  odoo-web-data:

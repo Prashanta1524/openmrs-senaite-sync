@@ -1,0 +1,85 @@
+- from:
+    uri: "scheduler://results-poll?delay=30000"
+    steps:
+      - setHeader:
+          name: "CamelHttpUri"
+          simple: "http://senaite:8080/senaite/@@API/senaite/v1/search?portal_type=Analysis&review_state=published&complete=yes"
+      - setHeader:
+          name: "Authorization"
+          constant: "Basic YWRtaW46YWRtaW4="
+      - to: "http://senaite:8080?throwExceptionOnFailure=false"
+      
+      - split:
+          jsonpath: "$.items[*]"
+          steps:
+            - setHeader:
+                name: "labResult"
+                jsonpath: "$.Result"
+            - setHeader:
+                name: "senaiteTestName"
+                jsonpath: "$.title"
+            - setHeader:
+                name: "patientId"
+                simple: "${header.fullPath.split('/')[3]}" 
+
+            # --- BUG FIX 1: TEST NAME MAPPING ---
+            # Mapping SENAITE "Blood" to OpenMRS "Complete blood count"
+            - choice:
+                when:
+                  - simple: "${header.senaiteTestName} == 'Blood'"
+                    setHeader:
+                      name: "openmrsSearchName"
+                      constant: "Complete blood count"
+                otherwise:
+                  setHeader:
+                    name: "openmrsSearchName"
+                    simple: "${header.senaiteTestName}"
+
+            - log: "Processing [${header.senaiteTestName}] as [${header.openmrsSearchName}] for Patient [${header.patientId}]"
+
+            # --- BUG FIX 2: ROBUST PATIENT SEARCH ---
+            - setHeader:
+                name: "CamelHttpUri"
+                # Using 'v=default' and 'q=' to find the identifier we linked earlier
+                simple: "http://backend:8080/openmrs/ws/rest/v1/patient?q=${header.patientId}&v=default"
+            - setHeader:
+                name: "Authorization"
+                constant: "Basic YWRtaW46QWRtaW4xMjM="
+            - to: "http://backend:8080?throwExceptionOnFailure=false"
+            
+            - setHeader:
+                name: "patientUuid"
+                jsonpath: "$.results[0].uuid"
+
+            # --- DYNAMIC CONCEPT LOOKUP ---
+            - setHeader:
+                name: "CamelHttpUri"
+                simple: "http://backend:8080/openmrs/ws/rest/v1/concept?q=${header.openmrsSearchName}"
+            - to: "http://backend:8080?throwExceptionOnFailure=false"
+            - setHeader:
+                name: "conceptUuid"
+                jsonpath: "$.results[0].uuid"
+
+            # --- FINAL POST TO DASHBOARD ---
+            - choice:
+                when:
+                  - simple: "${header.patientUuid} != null && ${header.conceptUuid} != null"
+                    steps:
+                      - setBody:
+                          simple: |
+                            {
+                              "person": "${header.patientUuid}",
+                              "concept": "${header.conceptUuid}",
+                              "value": "${header.labResult}"
+                            }
+                      - setHeader:
+                          name: "CamelHttpUri"
+                          constant: "http://backend:8080/openmrs/ws/rest/v1/obs"
+                      - setHeader:
+                          name: "CamelHttpMethod"
+                          constant: "POST"
+                      - to: "http://backend:8080?throwExceptionOnFailure=false"
+                      - log: "RESULT SYNC SUCCESS: ${header.openmrsSearchName} = ${header.labResult}"
+                otherwise:
+                  steps:
+                    - log: "BACK-SYNC FAILED: Missing Patient UUID (${header.patientUuid}) or Concept UUID (${header.conceptUuid})"

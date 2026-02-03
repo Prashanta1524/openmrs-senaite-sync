@@ -1,0 +1,61 @@
+- from:
+    uri: "kafka:dbserver1.openmrs.person_name?brokers=kafka:29092&autoOffsetReset=earliest&groupId=odoo-sync-group-v6"
+    steps:
+      - setHeader:
+          name: "op"
+          jsonpath: "$.payload.op"
+      - choice:
+          when:
+            - simple: "${header.op} == 'c' || ${header.op} == 'r'"
+              steps:
+                - setHeader:
+                    name: "givenName"
+                    jsonpath: "$.payload.after.given_name"
+                - setHeader:
+                    name: "familyName"
+                    jsonpath: "$.payload.after.family_name"
+                - setHeader:
+                    name: "personId"
+                    jsonpath: "$.payload.after.person_id"
+                
+                - log: "Odoo Sync: Sending Patient [${header.givenName}] to Database [odoo_db]..."
+
+                # ODOO JSON-RPC 2.0 PAYLOAD
+                - setBody:
+                    simple: |
+                      {
+                        "jsonrpc": "2.0",
+                        "method": "call",
+                        "params": {
+                          "service": "object",
+                          "method": "execute_kw",
+                          "args": [
+                            "odoo_db",
+                            2,
+                            "admin",
+                            "res.partner",
+                            "create",
+                            [{
+                              "name": "${header.givenName} ${header.familyName}",
+                              "ref": "omrs-${header.personId}",
+                              "is_company": false,
+                              "customer_rank": 1
+                            }]
+                          ]
+                        }
+                      }
+
+                - setHeader:
+                    name: "Content-Type"
+                    constant: "application/json"
+                - setHeader:
+                    name: "CamelHttpMethod"
+                    constant: "POST"
+                - setHeader:
+                    name: "CamelHttpUri"
+                    # Container name from your docker-compose
+                    simple: "http://odoo16:8069/jsonrpc"
+                
+                - to: "http://odoo16:8069?throwExceptionOnFailure=false"
+                
+                - log: "ODOO SYNC RESULT: ${body}"

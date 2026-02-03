@@ -1,0 +1,72 @@
+- from:
+    uri: "kafka:dbserver1.openmrs.orders?brokers=kafka:29092&autoOffsetReset=earliest&groupId=odoo-billing-final-v3"
+    steps:
+      - setHeader:
+          name: "op"
+          jsonpath: "$.payload.op"
+      - choice:
+          when:
+            - simple: "${header.op} == 'c' || ${header.op} == 'r'"
+              steps:
+                - setHeader:
+                    name: "patientId"
+                    jsonpath: "$.payload.after.patient_id"
+                - setHeader:
+                    name: "orderNumber"
+                    jsonpath: "$.payload.after.order_number"
+                
+                - log: "ODOO_BILLING_START: Processing Order ${header.orderNumber} for Patient omrs-${header.patientId}"
+
+                # 1. FIND THE PATIENT IN ODOO
+                - setBody:
+                    simple: |
+                      {
+                        "jsonrpc": "2.0",
+                        "method": "call",
+                        "params": {
+                          "service": "object",
+                          "method": "execute_kw",
+                          "args": ["odoo_db", 2, "admin", "res.partner", "search", [[["ref", "=", "omrs-${header.patientId}"]]]]
+                        }
+                      }
+                - setHeader:
+                    name: "Content-Type"
+                    constant: "application/json"
+                - setHeader:
+                    name: "CamelHttpMethod"
+                    constant: "POST"
+                - setHeader:
+                    name: "CamelHttpUri"
+                    simple: "http://odoo16:8069/jsonrpc"
+                - to: "http://odoo16:8069?throwExceptionOnFailure=false"
+                
+                - setHeader:
+                    name: "odooPartnerId"
+                    jsonpath: "$.result[0]"
+
+                # 2. CREATE THE SALE ORDER (BILL)
+                - choice:
+                    when:
+                      - simple: "${header.odooPartnerId} != null"
+                        steps:
+                          - log: "ODOO_BILLING_FOUND: Patient found (ID: ${header.odooPartnerId}). Creating Bill..."
+                          - setBody:
+                              simple: |
+                                {
+                                  "jsonrpc": "2.0",
+                                  "method": "call",
+                                  "params": {
+                                    "service": "object",
+                                    "method": "execute_kw",
+                                    "args": ["odoo_db", 2, "admin", "sale.order", "create", [{
+                                        "partner_id": ${header.odooPartnerId},
+                                        "client_order_ref": "${header.orderNumber}",
+                                        "order_line": [[0, 0, {"product_id": 1, "product_uom_qty": 1, "name": "Lab Service: ${header.orderNumber}"}]]
+                                      }]]
+                                  }
+                                }
+                          - to: "http://odoo16:8069?throwExceptionOnFailure=false"
+                          - log: "ODOO_BILLING_RESULT: ${body}"
+                    otherwise:
+                      steps: # <--- FIXED: Added 'steps:' here to prevent the SEQUENCE error
+                        - log: "ODOO_BILLING_ERROR: Patient omrs-${header.patientId} not found in Odoo."

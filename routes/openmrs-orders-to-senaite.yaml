@@ -9,49 +9,84 @@
             - simple: "${header.op} == 'c' || ${header.op} == 'r'"
               steps:
                 - setHeader:
-                    name: "conceptId"
-                    jsonpath: "$['payload']['after']['concept_id']"
+                    name: "patientId"
+                    jsonpath: "$['payload']['after']['patient_id']"
                 - setHeader:
                     name: "orderNumber"
                     jsonpath: "$['payload']['after']['order_number']"
-                - setHeader:
-                    name: "patientId"
-                    jsonpath: "$['payload']['after']['patient_id']"
                 
-                - log: "Syncing Lab Order: ${header.orderNumber} for Patient: omrs-${header.patientId}"
+                - log: ">>> START SYNC: Order ${header.orderNumber} for Patient omrs-${header.patientId}"
 
-                # BUILD JSON
-                # PASTE YOUR UIDs BELOW
-                - setBody:
-                    simple: |
-                      {
-                        "portal_type": "AnalysisRequest",
-                        "parent_path": "/senaite/clients/omrs-${header.patientId}",
-                        "ClientSampleID": "${header.orderNumber}",
-                        "Contact": "37d6761c2ddb4bc284d26579c31f2940",
-                        "SampleType": "dd25b457e62a4469863870adc7167324",
-                        "Analyses": ["49970b1caf72446292a5704393016a4c"],
-                        "DateSampled": "${date:now:yyyy-MM-dd HH:mm}"
-                      }
-
+                # --- 1. LOOKUP CONTACT ---
                 - setHeader:
-                    name: "Content-Type"
-                    constant: "application/json"
+                    name: "CamelHttpMethod"
+                    constant: "GET"
                 - setHeader:
-                    name: "Accept"
-                    constant: "application/json"
+                    name: "CamelHttpUri"
+                    simple: "http://senaite:8080/senaite/@@API/senaite/v1/search?id=contact-3"
                 - setHeader:
                     name: "Authorization"
                     constant: "Basic YWRtaW46YWRtaW4="
+                - to: "http://senaite:8080?throwExceptionOnFailure=false"
+                - setHeader:
+                    name: "contactUid"
+                    jsonpath: "$.items[0].uid"
+                - log: "DEBUG: Resolved Contact UID: ${header.contactUid}"
+
+                # --- 2. LOOKUP TEST ---
                 - setHeader:
                     name: "CamelHttpMethod"
-                    constant: "POST"
-                
-                # The API endpoint
+                    constant: "GET"
                 - setHeader:
                     name: "CamelHttpUri"
-                    simple: "http://senaite:8080/senaite/@@API/senaite/v1/create"
-                
+                    simple: "http://senaite:8080/senaite/@@API/senaite/v1/search?id=analysisservice-1"
                 - to: "http://senaite:8080?throwExceptionOnFailure=false"
-                
-                - log: "SENAITE ORDER RESPONSE: ${body}"
+                - setHeader:
+                    name: "testUid"
+                    jsonpath: "$.items[0].uid"
+                - log: "DEBUG: Resolved Test UID: ${header.testUid}"
+
+                # --- 3. LOOKUP SAMPLE TYPE ---
+                - setHeader:
+                    name: "CamelHttpMethod"
+                    constant: "GET"
+                - setHeader:
+                    name: "CamelHttpUri"
+                    simple: "http://senaite:8080/senaite/@@API/senaite/v1/search?id=sampletype-1"
+                - to: "http://senaite:8080?throwExceptionOnFailure=false"
+                - setHeader:
+                    name: "sampleTypeUid"
+                    jsonpath: "$.items[0].uid"
+                - log: "DEBUG: Resolved SampleType UID: ${header.sampleTypeUid}"
+
+                # --- 4. FINAL CREATE CALL ---
+                - choice:
+                    when:
+                      - simple: "${header.contactUid} != null && ${header.testUid} != null"
+                        steps:
+                          - setBody:
+                              simple: |
+                                {
+                                  "portal_type": "AnalysisRequest",
+                                  "parent_path": "/senaite/clients/omrs-${header.patientId}",
+                                  "ClientSampleID": "${header.orderNumber}",
+                                  "Contact": "${header.contactUid}",
+                                  "SampleType": "${header.sampleTypeUid}",
+                                  "Analyses": ["${header.testUid}"],
+                                  "DateSampled": "${date:now:yyyy-MM-dd HH:mm}"
+                                }
+                          - setHeader:
+                              name: "Content-Type"
+                              constant: "application/json"
+                          - setHeader:
+                              name: "CamelHttpMethod"
+                              constant: "POST"
+                          - setHeader:
+                              name: "CamelHttpUri"
+                              simple: "http://senaite:8080/senaite/@@API/senaite/v1/create"
+                          
+                          - to: "http://senaite:8080?throwExceptionOnFailure=false"
+                          - log: ">>> SENAITE RESULT: ${body}"
+                    otherwise:
+                      steps:
+                        - log: "ERROR: Failed to resolve UIDs. Sync aborted for ${header.orderNumber}"
