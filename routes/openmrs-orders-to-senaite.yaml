@@ -1,92 +1,96 @@
+# camel-k: language=yaml
+
 - from:
-    uri: "kafka:dbserver1.openmrs.orders?brokers=kafka:29092"
+    uri: "kafka:dbserver1.openmrs.orders?brokers=kafka:29092&autoOffsetReset=earliest&groupId=order-sync-final-v11"
     steps:
       - setHeader:
           name: "op"
-          jsonpath: "$['payload']['op']"
+          jsonpath: "$.payload.op"
       - choice:
           when:
             - simple: "${header.op} == 'c' || ${header.op} == 'r'"
               steps:
                 - setHeader:
                     name: "patientId"
-                    jsonpath: "$['payload']['after']['patient_id']"
+                    jsonpath: "$.payload.after.patient_id"
                 - setHeader:
                     name: "orderNumber"
-                    jsonpath: "$['payload']['after']['order_number']"
+                    jsonpath: "$.payload.after.order_number"
                 
-                - log: ">>> START SYNC: Order ${header.orderNumber} for Patient omrs-${header.patientId}"
+                - log: ">>> PROCESSING ORDER: ${header.orderNumber} for Patient: omrs-${header.patientId}"
 
-                # --- 1. LOOKUP CONTACT ---
+                # --- 1. SEARCH FOR CLIENT (Find UID) ---
                 - setHeader:
                     name: "CamelHttpMethod"
                     constant: "GET"
-                - setHeader:
-                    name: "CamelHttpUri"
-                    simple: "http://senaite:8080/senaite/@@API/senaite/v1/search?id=contact-3"
                 - setHeader:
                     name: "Authorization"
                     constant: "Basic YWRtaW46YWRtaW4="
-                - to: "http://senaite:8080?throwExceptionOnFailure=false"
+                - toD: "http://openmrs-distro-referenceapplication-senaite-1:8080/senaite/@@API/senaite/v1/search?portal_type=Client&id=omrs-${header.patientId}"
+                
                 - setHeader:
-                    name: "contactUid"
-                    jsonpath: "$.items[0].uid"
-                - log: "DEBUG: Resolved Contact UID: ${header.contactUid}"
+                    name: "clientUid"
+                    jsonpath:
+                      expression: "$.items[0].uid"
+                      suppressExceptions: true
 
-                # --- 2. LOOKUP TEST ---
-                - setHeader:
-                    name: "CamelHttpMethod"
-                    constant: "GET"
-                - setHeader:
-                    name: "CamelHttpUri"
-                    simple: "http://senaite:8080/senaite/@@API/senaite/v1/search?id=analysisservice-1"
-                - to: "http://senaite:8080?throwExceptionOnFailure=false"
-                - setHeader:
-                    name: "testUid"
-                    jsonpath: "$.items[0].uid"
-                - log: "DEBUG: Resolved Test UID: ${header.testUid}"
-
-                # --- 3. LOOKUP SAMPLE TYPE ---
-                - setHeader:
-                    name: "CamelHttpMethod"
-                    constant: "GET"
-                - setHeader:
-                    name: "CamelHttpUri"
-                    simple: "http://senaite:8080/senaite/@@API/senaite/v1/search?id=sampletype-1"
-                - to: "http://senaite:8080?throwExceptionOnFailure=false"
-                - setHeader:
-                    name: "sampleTypeUid"
-                    jsonpath: "$.items[0].uid"
-                - log: "DEBUG: Resolved SampleType UID: ${header.sampleTypeUid}"
-
-                # --- 4. FINAL CREATE CALL ---
+                # --- 2. FALLBACK SEARCH ---
                 - choice:
                     when:
-                      - simple: "${header.contactUid} != null && ${header.testUid} != null"
+                      - simple: "${header.clientUid} == null || ${header.clientUid.length} < 5"
                         steps:
+                          - toD: "http://openmrs-distro-referenceapplication-senaite-1:8080/senaite/@@API/senaite/v1/search?portal_type=Client&id=client-${header.patientId}"
+                          - setHeader:
+                              name: "clientUid"
+                              jsonpath:
+                                expression: "$.items[0].uid"
+                                suppressExceptions: true
+
+                # --- 3. PROCEED IF CLIENT UID FOUND ---
+                - choice:
+                    when:
+                      - simple: "${header.clientUid} != null && ${header.clientUid.length} > 5"
+                        steps:
+                          # A. Find Analysis Service UID (Complete Blood Count)
+                          - toD: "http://openmrs-distro-referenceapplication-senaite-1:8080/senaite/@@API/senaite/v1/search?portal_type=AnalysisService&id=analysisservice-1"
+                          - setHeader:
+                              name: "testUid"
+                              jsonpath: "$.items[0].uid"
+
+                          # B. Find first available Contact UID (Required)
+                          - toD: "http://openmrs-distro-referenceapplication-senaite-1:8080/senaite/@@API/senaite/v1/search?portal_type=Contact"
+                          - setHeader:
+                              name: "contactUid"
+                              jsonpath: "$.items[0].uid"
+
+                          # C. Find first available Sample Type UID (Required)
+                          - toD: "http://openmrs-distro-referenceapplication-senaite-1:8080/senaite/@@API/senaite/v1/search?portal_type=SampleType"
+                          - setHeader:
+                              name: "sampleTypeUid"
+                              jsonpath: "$.items[0].uid"
+
+                          - log: ">>> DATA: client=${header.clientUid}, test=${header.testUid}, contact=${header.contactUid}, type=${header.sampleTypeUid}"
+
+                          # D. CREATE ORDER
+                          - setHeader:
+                              name: "CamelHttpMethod"
+                              constant: "POST"
+                          - setHeader:
+                              name: "Content-Type"
+                              constant: "application/json"
                           - setBody:
                               simple: |
                                 {
                                   "portal_type": "AnalysisRequest",
-                                  "parent_path": "/senaite/clients/omrs-${header.patientId}",
+                                  "parent_uid": "${header.clientUid}",
                                   "ClientSampleID": "${header.orderNumber}",
                                   "Contact": "${header.contactUid}",
                                   "SampleType": "${header.sampleTypeUid}",
                                   "Analyses": ["${header.testUid}"],
                                   "DateSampled": "${date:now:yyyy-MM-dd HH:mm}"
                                 }
-                          - setHeader:
-                              name: "Content-Type"
-                              constant: "application/json"
-                          - setHeader:
-                              name: "CamelHttpMethod"
-                              constant: "POST"
-                          - setHeader:
-                              name: "CamelHttpUri"
-                              simple: "http://senaite:8080/senaite/@@API/senaite/v1/create"
-                          
-                          - to: "http://senaite:8080?throwExceptionOnFailure=false"
-                          - log: ">>> SENAITE RESULT: ${body}"
+                          - to: "http://openmrs-distro-referenceapplication-senaite-1:8080/senaite/@@API/senaite/v1/create?throwExceptionOnFailure=false"
+                          - log: ">>> FINAL SENAITE RESULT: ${body}"
                     otherwise:
                       steps:
-                        - log: "ERROR: Failed to resolve UIDs. Sync aborted for ${header.orderNumber}"
+                        - log: ">>> SKIP: Patient ${header.patientId} not found in SENAITE."

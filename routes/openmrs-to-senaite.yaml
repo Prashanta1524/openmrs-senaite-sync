@@ -1,57 +1,62 @@
+# camel-k: language=yaml
+
 - from:
-    uri: "kafka:dbserver1.openmrs.person_name?brokers=kafka:29092&autoOffsetReset=earliest&groupId=linker-group-v99"
+    uri: "kafka:dbserver1.openmrs.person_name?brokers=kafka:29092&autoOffsetReset=earliest&groupId=patient-sync-v2001"
     steps:
       - setHeader:
           name: "op"
           jsonpath: "$.payload.op"
       - choice:
           when:
-            - simple: "${header.op} == 'c' || ${header.op} == 'r'"
+            - simple: "${header.op} == 'c' || ${header.op} == 'r' || ${header.op} == 'u'"
               steps:
-                - setHeader:
-                    name: "givenName"
-                    jsonpath: "$.payload.after.given_name"
                 - setHeader:
                     name: "personId"
                     jsonpath: "$.payload.after.person_id"
-                
-                # --- STEP 1: CREATE CLIENT IN SENAITE ---
                 - setHeader:
-                    name: "CamelHttpUri"
-                    simple: "http://senaite:8080/senaite/@@API/senaite/v1/create"
+                    name: "firstName"
+                    jsonpath: "$.payload.after.given_name"
+                - setHeader:
+                    name: "lastName"
+                    jsonpath: "$.payload.after.family_name"
+
+                - setHeader:
+                    name: "CamelHttpMethod"
+                    constant: "GET"
                 - setHeader:
                     name: "Authorization"
                     constant: "Basic YWRtaW46YWRtaW4="
-                - setBody:
-                    simple: |
-                      {"portal_type": "Client", "parent_path": "/senaite/clients", "id": "omrs-${header.personId}", "ClientID": "omrs-${header.personId}", "Name": "${header.givenName}"}
-                - to: "http://senaite:8080?throwExceptionOnFailure=false"
+                
+                # Check if patient exists using ClientID
+                - toD: "http://openmrs-distro-referenceapplication-senaite-1:8080/senaite/@@API/senaite/v1/search?ClientID=omrs-${header.personId}"
+                
+                - setHeader:
+                    name: "exists"
+                    jsonpath:
+                      expression: "$.items[0].uid"
+                      suppressExceptions: true
 
-                # --- STEP 2: GET UUID FROM OPENMRS (Search by Name) ---
-                - setHeader:
-                    name: "CamelHttpUri"
-                    simple: "http://backend:8080/openmrs/ws/rest/v1/patient?q=${header.givenName}"
-                - setHeader:
-                    name: "Authorization"
-                    constant: "Basic YWRtaW46QWRtaW4xMjM="
-                - to: "http://backend:8080?throwExceptionOnFailure=false"
-                - setHeader:
-                    name: "patientUuid"
-                    jsonpath: "$.results[0].uuid"
-
-                # --- STEP 3: TELL OPENMRS ABOUT THE SENAITE ID ---
-                - setBody:
-                    simple: |
-                      {
-                        "identifier": "omrs-${header.personId}",
-                        "identifierType": "05a29f94-c0ed-11e2-94be-8c13b969e334",
-                        "location": "Outpatient Clinic"
-                      }
-                - setHeader:
-                    name: "CamelHttpUri"
-                    simple: "http://backend:8080/openmrs/ws/rest/v1/patient/${header.patientUuid}/identifier"
-                - setHeader:
-                    name: "CamelHttpMethod"
-                    constant: "POST"
-                - to: "http://backend:8080?throwExceptionOnFailure=false"
-                - log: "LINKED: omrs-${header.personId} is now a valid ID in OpenMRS"
+                - choice:
+                    when:
+                      - simple: "${header.exists} == null"
+                        steps:
+                          - log: ">>> Creating New Patient: omrs-${header.personId}"
+                          - setHeader:
+                              name: "CamelHttpMethod"
+                              constant: "POST"
+                          - setHeader:
+                              name: "Content-Type"
+                              constant: "application/json"
+                          - setBody:
+                              simple: |
+                                {
+                                  "portal_type": "Client", 
+                                  "parent_path": "/senaite/clients", 
+                                  "ClientID": "omrs-${header.personId}", 
+                                  "Name": "${header.firstName} ${header.lastName}"
+                                }
+                          - to: "http://openmrs-distro-referenceapplication-senaite-1:8080/senaite/@@API/senaite/v1/create?throwExceptionOnFailure=false"
+                          - log: "PATIENT CREATED: ${body}"
+                    otherwise:
+                      steps:
+                        - log: ">>> Patient omrs-${header.personId} already exists. Skipping."

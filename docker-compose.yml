@@ -1,5 +1,3 @@
-version: "3.1"
-
 services:
   # --- OPENMRS CORE ---
   gateway:
@@ -123,7 +121,7 @@ services:
 
   # --- APACHE CAMEL SYNC ---
   camel:
-    image: apache/camel-jbang:4.0.0
+    image: apache/camel-jbang:4.8.0
     container_name: camel-sync
     restart: "always"
     depends_on:
@@ -131,8 +129,12 @@ services:
       - senaite
       - odoo
     volumes:
-      - ./routes:/deployments
-    command: "run /deployments/openmrs-to-senaite.yaml /deployments/openmrs-orders-to-senaite.yaml /deployments/senaite-results-to-openmrs.yaml /deployments/openmrs-to-odoo-patient.yaml /deployments/openmrs-orders-to-odoo-billing.yaml"
+      - ./routes:/deployments:ro  # Read-only to protect your route files
+      - camel-cache:/root/.jbang  # Internal volume for JBang cache (Fixes the JDK error)
+    environment:
+      - JBANG_JDK_VERSION=17
+      - JBANG_NO_VERSION_CHECK=true
+    command: "run /deployments/openmrs-orders-to-odoo-billing.yaml /deployments/openmrs-to-odoo-patient.yaml /deployments/openmrs-orders-to-senaite.yaml /deployments/openmrs-to-senaite.yaml"
 
 volumes:
   openmrs-data:
@@ -140,3 +142,4 @@ volumes:
   senaite-data:
   odoo-db-data:
   odoo-web-data:
+  camel-cache:  # This volume stores the JDK so it doesn't need to download every time
