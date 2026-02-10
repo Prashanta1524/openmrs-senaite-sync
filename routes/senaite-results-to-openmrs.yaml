@@ -1,85 +1,106 @@
+# camel-k: language=yaml
+
 - from:
-    uri: "scheduler://results-poll?delay=30000"
+    uri: "timer:te-results-poll?period=10000&delay=5000"
     steps:
+      - log: "--- POLLING SENAITE FOR PUBLISHED TEST RESULTS (10s) ---"
+      
       - setHeader:
-          name: "CamelHttpUri"
-          simple: "http://senaite:8080/senaite/@@API/senaite/v1/search?portal_type=Analysis&review_state=published&complete=yes"
+          name: "CamelHttpMethod"
+          constant: "GET"
       - setHeader:
           name: "Authorization"
           constant: "Basic YWRtaW46YWRtaW4="
-      - to: "http://senaite:8080?throwExceptionOnFailure=false"
       
+      - to: "http://openmrs-distro-referenceapplication-senaite-1:8080/senaite/@@API/senaite/v1/search?portal_type=Analysis&review_state=published&include_fields=Result,getClientSampleID,ClientSampleID,getResult"
+
       - split:
           jsonpath: "$.items[*]"
           steps:
             - setHeader:
-                name: "labResult"
-                jsonpath: "$.Result"
-            - setHeader:
-                name: "senaiteTestName"
-                jsonpath: "$.title"
-            - setHeader:
-                name: "patientId"
-                simple: "${header.fullPath.split('/')[3]}" 
-
-            # --- BUG FIX 1: TEST NAME MAPPING ---
-            # Mapping SENAITE "Blood" to OpenMRS "Complete blood count"
-            - choice:
-                when:
-                  - simple: "${header.senaiteTestName} == 'Blood'"
-                    setHeader:
-                      name: "openmrsSearchName"
-                      constant: "Complete blood count"
-                otherwise:
-                  setHeader:
-                    name: "openmrsSearchName"
-                    simple: "${header.senaiteTestName}"
-
-            - log: "Processing [${header.senaiteTestName}] as [${header.openmrsSearchName}] for Patient [${header.patientId}]"
-
-            # --- BUG FIX 2: ROBUST PATIENT SEARCH ---
-            - setHeader:
-                name: "CamelHttpUri"
-                # Using 'v=default' and 'q=' to find the identifier we linked earlier
-                simple: "http://backend:8080/openmrs/ws/rest/v1/patient?q=${header.patientId}&v=default"
-            - setHeader:
-                name: "Authorization"
-                constant: "Basic YWRtaW46QWRtaW4xMjM="
-            - to: "http://backend:8080?throwExceptionOnFailure=false"
+                name: "orderNumber"
+                jsonpath:
+                  expression: "$.getClientSampleID"
+                  suppressExceptions: true
             
-            - setHeader:
-                name: "patientUuid"
-                jsonpath: "$.results[0].uuid"
-
-            # --- DYNAMIC CONCEPT LOOKUP ---
-            - setHeader:
-                name: "CamelHttpUri"
-                simple: "http://backend:8080/openmrs/ws/rest/v1/concept?q=${header.openmrsSearchName}"
-            - to: "http://backend:8080?throwExceptionOnFailure=false"
-            - setHeader:
-                name: "conceptUuid"
-                jsonpath: "$.results[0].uuid"
-
-            # --- FINAL POST TO DASHBOARD ---
             - choice:
                 when:
-                  - simple: "${header.patientUuid} != null && ${header.conceptUuid} != null"
+                  - simple: "${header.orderNumber} == null || ${header.orderNumber} == ''"
                     steps:
-                      - setBody:
-                          simple: |
-                            {
-                              "person": "${header.patientUuid}",
-                              "concept": "${header.conceptUuid}",
-                              "value": "${header.labResult}"
-                            }
                       - setHeader:
-                          name: "CamelHttpUri"
-                          constant: "http://backend:8080/openmrs/ws/rest/v1/obs"
+                          name: "orderNumber"
+                          jsonpath:
+                            expression: "$.ClientSampleID"
+                            suppressExceptions: true
+
+            - setHeader:
+                name: "senaiteResult"
+                jsonpath:
+                  expression: "$.Result"
+                  suppressExceptions: true
+            
+            - choice:
+                when:
+                  - simple: "${header.senaiteResult} == null || ${header.senaiteResult} == ''"
+                    steps:
+                      - setHeader:
+                          name: "senaiteResult"
+                          jsonpath:
+                            expression: "$.getResult"
+                            suppressExceptions: true
+
+            - choice:
+                when:
+                  - simple: "${header.orderNumber} starts with 'ORD-' && ${header.senaiteResult} != null && ${header.senaiteResult} != ''"
+                    steps:
+                      - log: ">>> DATA IDENTIFIED: Order=${header.orderNumber}, Result=${header.senaiteResult}. Syncing..."
+
+                      # --- OpenMRS LOOKUP (Get Patient, Concept, AND Encounter) ---
+                      - setHeader:
+                          name: "Authorization"
+                          constant: "Basic YWRtaW46QWRtaW4xMjM="
                       - setHeader:
                           name: "CamelHttpMethod"
-                          constant: "POST"
-                      - to: "http://backend:8080?throwExceptionOnFailure=false"
-                      - log: "RESULT SYNC SUCCESS: ${header.openmrsSearchName} = ${header.labResult}"
+                          constant: "GET"
+                      - toD: "http://openmrs-distro-referenceapplication-backend-1:8080/openmrs/ws/rest/v1/order?q=${header.orderNumber}&v=full"
+
+                      - setHeader:
+                          name: "patientUuid"
+                          jsonpath: "$.results[0].patient.uuid"
+                      - setHeader:
+                          name: "conceptUuid"
+                          jsonpath: "$.results[0].concept.uuid"
+                      - setHeader:
+                          name: "orderUuid"
+                          jsonpath: "$.results[0].uuid"
+                      # IMPORTANT: This links the result to the Lab Encounter so the UI can see it
+                      - setHeader:
+                          name: "encounterUuid"
+                          jsonpath: "$.results[0].encounter.uuid"
+
+                      # --- OpenMRS SAVE OBSERVATION ---
+                      - choice:
+                          when:
+                            - simple: "${header.patientUuid} != null"
+                              steps:
+                                - setHeader:
+                                    name: "CamelHttpMethod"
+                                    constant: "POST"
+                                - setHeader:
+                                    name: "Content-Type"
+                                    constant: "application/json"
+                                - setBody:
+                                    simple: |
+                                      {
+                                        "person": "${header.patientUuid}",
+                                        "concept": "${header.conceptUuid}",
+                                        "value": "${header.senaiteResult}",
+                                        "order": "${header.orderUuid}",
+                                        "encounter": "${header.encounterUuid}",
+                                        "obsDatetime": "${date:now:yyyy-MM-dd'T'HH:mm:ss.SSSZ}"
+                                      }
+                                - to: "http://openmrs-distro-referenceapplication-backend-1:8080/openmrs/ws/rest/v1/obs"
+                                - log: ">>> SUCCESS: ${header.orderNumber} result (${header.senaiteResult}) is now in OpenMRS."
                 otherwise:
                   steps:
-                    - log: "BACK-SYNC FAILED: Missing Patient UUID (${header.patientUuid}) or Concept UUID (${header.conceptUuid})"
+                    - log: ">>> DEBUG: Found Analysis item. Order: '${header.orderNumber}', Result: '${header.senaiteResult}'"

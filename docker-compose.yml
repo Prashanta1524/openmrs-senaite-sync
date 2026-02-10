@@ -134,7 +134,7 @@ services:
     environment:
       - JBANG_JDK_VERSION=17
       - JBANG_NO_VERSION_CHECK=true
-    command: "run /deployments/openmrs-orders-to-odoo-billing.yaml /deployments/openmrs-to-odoo-patient.yaml /deployments/openmrs-orders-to-senaite.yaml /deployments/openmrs-to-senaite.yaml"
+    command: "run /deployments/openmrs-orders-to-odoo-billing.yaml /deployments/openmrs-to-odoo-patient.yaml /deployments/openmrs-orders-to-senaite.yaml /deployments/openmrs-to-senaite.yaml /deployments/senaite-results-to-openmrs.yaml"
 
 volumes:
   openmrs-data:
