@@ -3,7 +3,7 @@
 - from:
     uri: "timer:te-results-poll?period=10000&delay=5000"
     steps:
-      - log: "--- POLLING SENAITE FOR PUBLISHED TEST RESULTS (10s) ---"
+      - log: "--- POLLING SENAITE FOR PUBLISHED RESULTS ---"
       
       - setHeader:
           name: "CamelHttpMethod"
@@ -12,73 +12,95 @@
           name: "Authorization"
           constant: "Basic YWRtaW46YWRtaW4="
       
-      - to: "http://openmrs-distro-referenceapplication-senaite-1:8080/senaite/@@API/senaite/v1/search?portal_type=Analysis&review_state=published&include_fields=Result,getClientSampleID,ClientSampleID,getResult"
+      - to: "http://openmrs-distro-referenceapplication-senaite-1:8080/senaite/@@API/senaite/v1/search?portal_type=Analysis&review_state=published&include_fields=Result,getResult,ClientOrderNumber,parent_id&include_parent=true"
 
       - split:
           jsonpath: "$.items[*]"
           steps:
-            - setHeader:
-                name: "orderNumber"
-                jsonpath:
-                  expression: "$.getClientSampleID"
-                  suppressExceptions: true
-            
-            - choice:
-                when:
-                  - simple: "${header.orderNumber} == null || ${header.orderNumber} == ''"
-                    steps:
-                      - setHeader:
-                          name: "orderNumber"
-                          jsonpath:
-                            expression: "$.ClientSampleID"
-                            suppressExceptions: true
-
+            # --- START WORKING SENAITE LOGIC ---
             - setHeader:
                 name: "senaiteResult"
-                jsonpath:
-                  expression: "$.Result"
-                  suppressExceptions: true
-            
+                expression:
+                  jsonpath:
+                    expression: "$.Result"
+                    suppress-exceptions: true
             - choice:
                 when:
                   - simple: "${header.senaiteResult} == null || ${header.senaiteResult} == ''"
                     steps:
                       - setHeader:
                           name: "senaiteResult"
-                          jsonpath:
-                            expression: "$.getResult"
-                            suppressExceptions: true
+                          expression:
+                            jsonpath:
+                              expression: "$.getResult"
+                              suppress-exceptions: true
+
+            - setHeader:
+                name: "orderNumber"
+                expression:
+                  jsonpath:
+                    expression: "$.ClientOrderNumber"
+                    suppress-exceptions: true
+            - choice:
+                when:
+                  - simple: "${header.orderNumber} == null || ${header.orderNumber} == ''"
+                    steps:
+                      - setHeader:
+                          name: "orderNumber"
+                          expression:
+                            jsonpath:
+                              expression: "$.parent_id"
+                              suppress-exceptions: true
+            # --- END WORKING SENAITE LOGIC ---
 
             - choice:
                 when:
-                  - simple: "${header.orderNumber} starts with 'ORD-' && ${header.senaiteResult} != null && ${header.senaiteResult} != ''"
+                  - simple: "${header.orderNumber} != null && ${header.senaiteResult} != null && ${header.orderNumber} regex '^(ORD|CBC)-.*'"
                     steps:
-                      - log: ">>> DATA IDENTIFIED: Order=${header.orderNumber}, Result=${header.senaiteResult}. Syncing..."
+                      - log: ">>> DATA IDENTIFIED: Order=${header.orderNumber}, Result=${header.senaiteResult}. Connecting to OpenMRS..."
 
-                      # --- OpenMRS LOOKUP (Get Patient, Concept, AND Encounter) ---
                       - setHeader:
                           name: "Authorization"
                           constant: "Basic YWRtaW46QWRtaW4xMjM="
                       - setHeader:
                           name: "CamelHttpMethod"
                           constant: "GET"
-                      - toD: "http://openmrs-distro-referenceapplication-backend-1:8080/openmrs/ws/rest/v1/order?q=${header.orderNumber}&v=full"
+                      
+                      # FIX 1: Clear the body so the GET request is clean. 
+                      # This prevents the 400 error caused by sending SENAITE JSON to OpenMRS.
+                      - setBody:
+                          constant: null
+                      
+                      # FIX 2: Use 'orderNumber=' instead of 'q=' for OpenMRS Order lookup.
+                      - toD: "http://openmrs-distro-referenceapplication-backend-1:8080/openmrs/ws/rest/v1/order?orderNumber=${header.orderNumber}&v=full"
 
+                      # FIX 3: Added suppress-exceptions to these jsonpaths 
+                      # so the route doesn't crash if OpenMRS returns no results.
                       - setHeader:
                           name: "patientUuid"
-                          jsonpath: "$.results[0].patient.uuid"
+                          expression:
+                            jsonpath:
+                              expression: "$.results[0].patient.uuid"
+                              suppress-exceptions: true
                       - setHeader:
                           name: "conceptUuid"
-                          jsonpath: "$.results[0].concept.uuid"
+                          expression:
+                            jsonpath:
+                              expression: "$.results[0].concept.uuid"
+                              suppress-exceptions: true
                       - setHeader:
                           name: "orderUuid"
-                          jsonpath: "$.results[0].uuid"
-                      # IMPORTANT: This links the result to the Lab Encounter so the UI can see it
+                          expression:
+                            jsonpath:
+                              expression: "$.results[0].uuid"
+                              suppress-exceptions: true
                       - setHeader:
                           name: "encounterUuid"
-                          jsonpath: "$.results[0].encounter.uuid"
+                          expression:
+                            jsonpath:
+                              expression: "$.results[0].encounter.uuid"
+                              suppress-exceptions: true
 
-                      # --- OpenMRS SAVE OBSERVATION ---
                       - choice:
                           when:
                             - simple: "${header.patientUuid} != null"
@@ -94,13 +116,16 @@
                                       {
                                         "person": "${header.patientUuid}",
                                         "concept": "${header.conceptUuid}",
-                                        "value": "${header.senaiteResult}",
+                                        "value": ${header.senaiteResult},
                                         "order": "${header.orderUuid}",
                                         "encounter": "${header.encounterUuid}",
                                         "obsDatetime": "${date:now:yyyy-MM-dd'T'HH:mm:ss.SSSZ}"
                                       }
                                 - to: "http://openmrs-distro-referenceapplication-backend-1:8080/openmrs/ws/rest/v1/obs"
-                                - log: ">>> SUCCESS: ${header.orderNumber} result (${header.senaiteResult}) is now in OpenMRS."
+                                - log: ">>> SUCCESS: ${header.orderNumber} result saved to OpenMRS."
+                          otherwise:
+                            steps:
+                              - log: ">>> WARNING: Order ${header.orderNumber} not found in OpenMRS system."
                 otherwise:
                   steps:
-                    - log: ">>> DEBUG: Found Analysis item. Order: '${header.orderNumber}', Result: '${header.senaiteResult}'"
+                    - log: ">>> DEBUG: Found Analysis item. Order ID: '${header.orderNumber}', Result: '${header.senaiteResult}'"
